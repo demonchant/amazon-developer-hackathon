@@ -61,6 +61,7 @@ def config() -> dict[str, Any]:
     google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
     google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
     session_signing_key = os.getenv("SESSION_SIGNING_KEY", "").strip()
+    google_maps_api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     if host not in ("127.0.0.1", "0.0.0.0"):
         raise ValueError("FIELDCALL_HOST must be 127.0.0.1 or 0.0.0.0")
     if not (1 <= port <= 65535):
@@ -81,7 +82,8 @@ def config() -> dict[str, Any]:
         raise ValueError("GOOGLE_REDIRECT_URI must use HTTPS except on localhost")
     return {"host": host, "port": port, "user_agent": user_agent, "db_path": db_path, "timeout": timeout,
             "google_client_id": google_client_id, "google_client_secret": google_client_secret,
-            "google_redirect_uri": google_redirect_uri, "session_signing_key": session_signing_key}
+            "google_redirect_uri": google_redirect_uri, "session_signing_key": session_signing_key,
+            "google_maps_api_key": google_maps_api_key}
 
 
 CFG = config()
@@ -114,6 +116,9 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS provider_attempts (
       provider TEXT PRIMARY KEY, attempted_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS geocode_usage (
+      day TEXT PRIMARY KEY, request_count INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS forecast_cache (
       request_url TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, expires_at TEXT,
       last_modified TEXT, body_json TEXT NOT NULL
@@ -122,6 +127,8 @@ with db() as conn:
     event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
     if "owner_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN owner_id TEXT")
+    if "location_address" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN location_address TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS events_owner_id_id ON events(owner_id, id DESC)")
 
 
@@ -156,6 +163,9 @@ def validate_event(v: dict[str, Any]) -> dict[str, Any]:
     lat, lon = float(v["latitude"]), float(v["longitude"])
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("Latitude/longitude out of range")
+    location_address = str(v.get("location_address") or "").strip()
+    if len(location_address) > 300 or any(ord(c) < 32 for c in location_address):
+        raise ValueError("Location address is invalid")
     start = datetime.fromisoformat(str(v["starts_at"]).replace("Z", "+00:00"))
     end = datetime.fromisoformat(str(v["ends_at"]).replace("Z", "+00:00"))
     if not start.tzinfo or not end.tzinfo or end <= start:
@@ -176,7 +186,7 @@ def validate_event(v: dict[str, Any]) -> dict[str, Any]:
     if limits["min_temp_c"] is not None and limits["max_temp_c"] is not None and limits["min_temp_c"] > limits["max_temp_c"]:
         raise ValueError("Minimum temperature must not exceed maximum")
     return {"name": name, "latitude": lat, "longitude": lon, "starts_at": start.astimezone(timezone.utc).isoformat(),
-            "ends_at": end.astimezone(timezone.utc).isoformat(), **limits}
+            "ends_at": end.astimezone(timezone.utc).isoformat(), "location_address": location_address or None, **limits}
 
 
 def parse_dt(value: str) -> datetime:
@@ -360,13 +370,14 @@ mcp = FastMCP("FieldCall", instructions="Save outdoor events worldwide and compa
 @mcp.tool()
 def save_outdoor_event(name: str, latitude: float, longitude: float, starts_at: str, ends_at: str,
                        max_temp_c: float | None = None, min_temp_c: float | None = None,
-                       max_wind_kph: float | None = None, max_precip_mm: float | None = None) -> dict[str, Any]:
+                       max_wind_kph: float | None = None, max_precip_mm: float | None = None,
+                       location_address: str | None = None) -> dict[str, Any]:
     """Persist a user-defined outdoor event and its own weather tolerances; no weather is fabricated."""
     value = validate_event(locals())
     owner_id = current_user()["sub"]
     with db() as conn:
-        cur = conn.execute("INSERT INTO events(name,latitude,longitude,starts_at,ends_at,max_temp_c,min_temp_c,max_wind_kph,max_precip_mm,created_at,owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-          (value["name"], value["latitude"], value["longitude"], value["starts_at"], value["ends_at"], value["max_temp_c"], value["min_temp_c"], value["max_wind_kph"], value["max_precip_mm"], now(), owner_id))
+        cur = conn.execute("INSERT INTO events(name,latitude,longitude,starts_at,ends_at,max_temp_c,min_temp_c,max_wind_kph,max_precip_mm,created_at,owner_id,location_address) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+          (value["name"], value["latitude"], value["longitude"], value["starts_at"], value["ends_at"], value["max_temp_c"], value["min_temp_c"], value["max_wind_kph"], value["max_precip_mm"], now(), owner_id, value["location_address"]))
         row = conn.execute("SELECT * FROM events WHERE id=?", (cur.lastrowid,)).fetchone()
     return event_dict(row)
 
@@ -393,6 +404,8 @@ def list_outdoor_events() -> list[dict[str, Any]]:
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 DASHBOARD = (STATIC_DIR / "dashboard.html").read_text(encoding="utf-8")
+PRIVACY = (STATIC_DIR / "privacy.html").read_text(encoding="utf-8")
+TERMS = (STATIC_DIR / "terms.html").read_text(encoding="utf-8")
 STYLE = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
 DASHBOARD_STYLE = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
 LANDING_STYLE = (STATIC_DIR / "landing.css").read_text(encoding="utf-8")
@@ -403,6 +416,8 @@ DASHBOARD_IMAGE = (STATIC_DIR / "dashboard-bg.webp").read_bytes()
 
 async def homepage(request: Request): return HTMLResponse(INDEX)
 async def dashboard(request: Request): return HTMLResponse(DASHBOARD)
+async def privacy_page(request: Request): return HTMLResponse(PRIVACY)
+async def terms_page(request: Request): return HTMLResponse(TERMS)
 async def stylesheet(request: Request):
     from starlette.responses import Response
     return Response(STYLE, media_type="text/css")
@@ -421,6 +436,72 @@ async def dashboard_image(request: Request):
 async def javascript(request: Request):
     from starlette.responses import Response
     return Response(SCRIPT, media_type="text/javascript")
+
+
+def normalize_geocode_results(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate real Google Geocoding results before exposing location choices."""
+    if document.get("status") != "OK":
+        if document.get("status") == "ZERO_RESULTS":
+            return []
+        raise ValueError("Google Maps could not resolve this location")
+    raw_results = document.get("results")
+    if not isinstance(raw_results, list):
+        raise ValueError("Google Maps returned an invalid result")
+    output = []
+    for item in raw_results[:5]:
+        if not isinstance(item, dict) or not isinstance(item.get("formatted_address"), str):
+            continue
+        geometry = item.get("geometry")
+        point = geometry.get("location") if isinstance(geometry, dict) else None
+        if not isinstance(point, dict):
+            continue
+        try:
+            lat, lon = float(point["lat"]), float(point["lng"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            output.append({"address": item["formatted_address"], "latitude": lat, "longitude": lon})
+    return output
+
+
+async def api_geocode(request: Request):
+    if not CFG["google_maps_api_key"]:
+        return JSONResponse({"error": "Address lookup is not configured yet. Enter coordinates manually or configure Google Maps Geocoding."}, status_code=503)
+    try:
+        value = await bounded_json(request)
+        address = str(value.get("address", "")).strip()
+        if not 3 <= len(address) <= 250 or any(ord(c) < 32 for c in address):
+            raise ValueError("Enter a location between 3 and 250 characters")
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # Hard application cap: at most 100 Google geocoding calls per UTC day.
+    # Also set the matching per-day quota in Google Cloud Console.
+    day = datetime.now(timezone.utc).date().isoformat()
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT request_count FROM geocode_usage WHERE day=?", (day,)).fetchone()
+        if row and row["request_count"] >= 100:
+            conn.rollback()
+            return JSONResponse({"error": "Address lookup daily limit reached. Try again tomorrow or enter coordinates manually."}, status_code=429)
+        conn.execute("INSERT INTO geocode_usage(day,request_count) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET request_count=request_count+1", (day,))
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(CFG["timeout"]), follow_redirects=False) as client:
+            response = await client.get("https://maps.googleapis.com/maps/api/geocode/json",
+                params={"address": address, "key": CFG["google_maps_api_key"]})
+        response.raise_for_status()
+        document = response.json()
+        if not isinstance(document, dict):
+            raise ValueError("Google Maps returned an invalid response")
+        results = normalize_geocode_results(document)
+        if not results:
+            return JSONResponse({"results": [], "message": "Google Maps found no matching locations. Try adding a city or country."})
+        return JSONResponse({"results": results, "attribution": "Google Maps"})
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": f"Address lookup failed: {type(exc).__name__}. You can enter coordinates manually."}, status_code=502)
+
+
 async def api_events(request: Request):
     if request.method == "GET":
         try: return JSONResponse(await invoke_mcp("list_outdoor_events", {}))
@@ -601,7 +682,7 @@ async def api_session(request: Request):
     return JSONResponse({"authenticated": True, "name": user.get("name", ""), "email": user.get("email", "")})
 
 
-for path, endpoint, methods in [("/",homepage,["GET"]),("/dashboard",dashboard,["GET"]),("/landing.css",landing_stylesheet,["GET"]),("/dashboard.css",dashboard_stylesheet,["GET"]),("/fieldcall-hero.webp",hero_image,["GET"]),("/dashboard-bg.webp",dashboard_image,["GET"]),("/style.css",stylesheet,["GET"]),("/app.js",javascript,["GET"]),("/api/session",api_session,["GET"]),("/api/events",api_events,["GET","POST"]),("/api/events/{event_id:int}/recheck",api_recheck,["POST"]),("/api/assistant",api_assistant,["POST"]),("/health",health,["GET"]),("/auth/login",auth_login,["GET"]),("/auth/callback",auth_callback,["GET"]),("/auth/logout",auth_logout,["POST"])]:
+for path, endpoint, methods in [("/",homepage,["GET"]),("/privacy",privacy_page,["GET"]),("/terms",terms_page,["GET"]),("/dashboard",dashboard,["GET"]),("/landing.css",landing_stylesheet,["GET"]),("/dashboard.css",dashboard_stylesheet,["GET"]),("/fieldcall-hero.webp",hero_image,["GET"]),("/dashboard-bg.webp",dashboard_image,["GET"]),("/style.css",stylesheet,["GET"]),("/app.js",javascript,["GET"]),("/api/session",api_session,["GET"]),("/api/geocode",api_geocode,["POST"]),("/api/events",api_events,["GET","POST"]),("/api/events/{event_id:int}/recheck",api_recheck,["POST"]),("/api/assistant",api_assistant,["POST"]),("/health",health,["GET"]),("/auth/login",auth_login,["GET"]),("/auth/callback",auth_callback,["GET"]),("/auth/logout",auth_logout,["POST"])]:
     mcp.custom_route(path, methods=methods)(endpoint)
 
 
@@ -618,7 +699,7 @@ class SecurityHeaders(BaseHTTPMiddleware):
 class AccessControl(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        public_paths = {"/health", "/", "/style.css", "/landing.css", "/dashboard.css", "/dashboard-bg.webp", "/fieldcall-hero.webp", "/app.js", "/api/session", "/auth/login", "/auth/callback", "/auth/logout"}
+        public_paths = {"/health", "/", "/privacy", "/terms", "/style.css", "/landing.css", "/dashboard.css", "/dashboard-bg.webp", "/fieldcall-hero.webp", "/app.js", "/api/session", "/auth/login", "/auth/callback", "/auth/logout"}
         user = decode_session(request.cookies.get("fieldcall_session", ""))
         if path == "/dashboard" and not user:
             return RedirectResponse("/auth/login", status_code=303)

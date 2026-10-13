@@ -26,6 +26,16 @@ class FieldCallLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):app.validate_event(x)
         x=self.event();x["ends_at"]=(datetime.fromisoformat(x["starts_at"])+timedelta(days=4)).isoformat()
         with self.assertRaises(ValueError):app.validate_event(x)
+    def test_event_validation_keeps_optional_selected_address(self):
+        x=self.event();x["location_address"]="Freedom Park, Lagos, Nigeria"
+        self.assertEqual(app.validate_event(x)["location_address"],"Freedom Park, Lagos, Nigeria")
+        x["location_address"]="x"*301
+        with self.assertRaises(ValueError):app.validate_event(x)
+    def test_geocode_result_parser_validates_google_result_shape(self):
+        doc={"status":"OK","results":[{"formatted_address":"Freedom Park, Lagos, Nigeria","geometry":{"location":{"lat":6.44894,"lng":3.39655}}}]}
+        self.assertEqual(app.normalize_geocode_results(doc),[{"address":"Freedom Park, Lagos, Nigeria","latitude":6.44894,"longitude":3.39655}])
+        self.assertEqual(app.normalize_geocode_results({"status":"ZERO_RESULTS","results":[]}),[])
+        with self.assertRaises(ValueError):app.normalize_geocode_results({"status":"REQUEST_DENIED"})
     def test_normalize_met_documented_global_fields_and_missing_values(self):
         doc={"properties":{"meta":{"updated_at":"2026-10-13T00:00:00Z"},"timeseries":[
             {"time":"2026-10-14T00:00:00Z","data":{"instant":{"details":{"air_temperature":22,"wind_speed":4}},"next_1_hours":{"details":{"precipitation_amount":1.5}}}},
