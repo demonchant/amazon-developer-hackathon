@@ -10,5 +10,11 @@ services:
         value: "FieldCall/0.1 (https://github.com/demonchant/amazon-developer-hackathon)"
       - key: FIELDCALL_HOST
         value: 0.0.0.0
-      - key: FIELDCALL_ACCESS_PASSWORD
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://fieldcall.onrender.com/auth/callback
+      - key: SESSION_SIGNING_KEY
         generateValue: true

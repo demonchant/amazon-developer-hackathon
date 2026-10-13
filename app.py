@@ -4,22 +4,29 @@ from __future__ import annotations
 import json
 import asyncio
 import base64
-import hmac
+import hashlib
 import os
 import re
 import sqlite3
+import secrets
+import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+
+CURRENT_USER: ContextVar[dict[str, str] | None] = ContextVar("fieldcall_user", default=None)
+CURRENT_SESSION_COOKIE: ContextVar[str | None] = ContextVar("fieldcall_session_cookie", default=None)
 
 
 def load_local_env(path: Path = Path(".env")) -> None:
@@ -50,7 +57,10 @@ def config() -> dict[str, Any]:
     user_agent = os.getenv("WEATHER_USER_AGENT", "").strip()
     db_path = os.getenv("DATABASE_PATH", "data/fieldcall.sqlite3")
     timeout = float(os.getenv("WEATHER_TIMEOUT_SECONDS", "12"))
-    access_password = os.getenv("FIELDCALL_ACCESS_PASSWORD", "").strip()
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+    google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
+    session_signing_key = os.getenv("SESSION_SIGNING_KEY", "").strip()
     if host not in ("127.0.0.1", "0.0.0.0"):
         raise ValueError("FIELDCALL_HOST must be 127.0.0.1 or 0.0.0.0")
     if not (1 <= port <= 65535):
@@ -62,10 +72,16 @@ def config() -> dict[str, Any]:
         raise ValueError("WEATHER_USER_AGENT must include a contact email or HTTPS project/contact URL")
     if not (2 <= timeout <= 60):
         raise ValueError("WEATHER_TIMEOUT_SECONDS must be 2..60")
-    if access_password and len(access_password) < 24:
-        raise ValueError("FIELDCALL_ACCESS_PASSWORD must contain at least 24 characters when configured")
+    oauth_values = (google_client_id, google_client_secret, google_redirect_uri, session_signing_key)
+    if not all(oauth_values):
+        raise ValueError("Google OAuth is required: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, and SESSION_SIGNING_KEY")
+    if len(session_signing_key) < 32:
+        raise ValueError("SESSION_SIGNING_KEY must contain at least 32 characters")
+    if not google_redirect_uri.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        raise ValueError("GOOGLE_REDIRECT_URI must use HTTPS except on localhost")
     return {"host": host, "port": port, "user_agent": user_agent, "db_path": db_path, "timeout": timeout,
-            "access_password": access_password}
+            "google_client_id": google_client_id, "google_client_secret": google_client_secret,
+            "google_redirect_uri": google_redirect_uri, "session_signing_key": session_signing_key}
 
 
 CFG = config()
@@ -87,7 +103,7 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
       starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, max_temp_c REAL, min_temp_c REAL,
-      max_wind_kph REAL, max_precip_mm REAL, created_at TEXT NOT NULL
+      max_wind_kph REAL, max_precip_mm REAL, created_at TEXT NOT NULL, owner_id TEXT
     );
     CREATE TABLE IF NOT EXISTS evaluations (
       id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -103,6 +119,30 @@ with db() as conn:
       last_modified TEXT, body_json TEXT NOT NULL
     );
     """)
+    event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "owner_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN owner_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS events_owner_id_id ON events(owner_id, id DESC)")
+
+
+def current_user() -> dict[str, str]:
+    user = CURRENT_USER.get()
+    if not user or not user.get("sub"):
+        raise ValueError("Sign in with Google before using FieldCall")
+    return user
+
+
+def session_token(user: dict[str, str]) -> str:
+    return jwt.encode({**user, "exp": datetime.now(timezone.utc) + timedelta(days=7), "iat": datetime.now(timezone.utc)},
+                      CFG["session_signing_key"], algorithm="HS256")
+
+
+def decode_session(token: str) -> dict[str, str] | None:
+    try:
+        claims = jwt.decode(token, CFG["session_signing_key"], algorithms=["HS256"], options={"require": ["sub", "exp", "iat"]})
+        return {key: str(claims[key]) for key in ("sub", "email", "name") if claims.get(key)}
+    except (jwt.PyJWTError, KeyError, TypeError):
+        return None
 
 
 def now() -> str:
@@ -269,8 +309,9 @@ async def met_forecast(client: httpx.AsyncClient, url: str) -> tuple[dict[str, A
 
 
 async def evaluate(event_id: int) -> dict[str, Any]:
+    owner_id = current_user()["sub"]
     with db() as conn:
-        row = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        row = conn.execute("SELECT * FROM events WHERE id=? AND owner_id=?", (event_id, owner_id)).fetchone()
     if not row: raise ValueError("Event not found")
     event = dict(row)
     timeout = httpx.Timeout(CFG["timeout"])
@@ -300,6 +341,7 @@ def evaluation_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 def event_dict(row: sqlite3.Row, history: bool = True) -> dict[str, Any]:
     item = dict(row)
+    item.pop("owner_id", None)
     if history:
         with db() as conn:
             item["evaluations"] = [evaluation_dict(x) for x in conn.execute("SELECT * FROM evaluations WHERE event_id=? ORDER BY id DESC", (item["id"],))]
@@ -321,9 +363,10 @@ def save_outdoor_event(name: str, latitude: float, longitude: float, starts_at: 
                        max_wind_kph: float | None = None, max_precip_mm: float | None = None) -> dict[str, Any]:
     """Persist a user-defined outdoor event and its own weather tolerances; no weather is fabricated."""
     value = validate_event(locals())
+    owner_id = current_user()["sub"]
     with db() as conn:
-        cur = conn.execute("INSERT INTO events(name,latitude,longitude,starts_at,ends_at,max_temp_c,min_temp_c,max_wind_kph,max_precip_mm,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-          (value["name"], value["latitude"], value["longitude"], value["starts_at"], value["ends_at"], value["max_temp_c"], value["min_temp_c"], value["max_wind_kph"], value["max_precip_mm"], now()))
+        cur = conn.execute("INSERT INTO events(name,latitude,longitude,starts_at,ends_at,max_temp_c,min_temp_c,max_wind_kph,max_precip_mm,created_at,owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          (value["name"], value["latitude"], value["longitude"], value["starts_at"], value["ends_at"], value["max_temp_c"], value["min_temp_c"], value["max_wind_kph"], value["max_precip_mm"], now(), owner_id))
         row = conn.execute("SELECT * FROM events WHERE id=?", (cur.lastrowid,)).fetchone()
     return event_dict(row)
 
@@ -343,20 +386,38 @@ async def recheck_outdoor_event(event_id: int) -> dict[str, Any]:
 @mcp.tool()
 def list_outdoor_events() -> list[dict[str, Any]]:
     """List only events actually saved by this user, with persisted evaluation history."""
-    with db() as conn: rows = conn.execute("SELECT * FROM events ORDER BY id DESC").fetchall()
+    with db() as conn: rows = conn.execute("SELECT * FROM events WHERE owner_id=? ORDER BY id DESC", (current_user()["sub"],)).fetchall()
     return [event_dict(r) for r in rows]
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+DASHBOARD = (STATIC_DIR / "dashboard.html").read_text(encoding="utf-8")
 STYLE = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+DASHBOARD_STYLE = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+LANDING_STYLE = (STATIC_DIR / "landing.css").read_text(encoding="utf-8")
 SCRIPT = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+HERO_IMAGE = (STATIC_DIR / "fieldcall-hero.webp").read_bytes()
+DASHBOARD_IMAGE = (STATIC_DIR / "dashboard-bg.webp").read_bytes()
 
 
 async def homepage(request: Request): return HTMLResponse(INDEX)
+async def dashboard(request: Request): return HTMLResponse(DASHBOARD)
 async def stylesheet(request: Request):
     from starlette.responses import Response
     return Response(STYLE, media_type="text/css")
+async def landing_stylesheet(request: Request):
+    from starlette.responses import Response
+    return Response(LANDING_STYLE, media_type="text/css")
+async def dashboard_stylesheet(request: Request):
+    from starlette.responses import Response
+    return Response(DASHBOARD_STYLE, media_type="text/css")
+async def hero_image(request: Request):
+    from starlette.responses import Response
+    return Response(HERO_IMAGE, media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"})
+async def dashboard_image(request: Request):
+    from starlette.responses import Response
+    return Response(DASHBOARD_IMAGE, media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"})
 async def javascript(request: Request):
     from starlette.responses import Response
     return Response(SCRIPT, media_type="text/javascript")
@@ -427,9 +488,9 @@ async def invoke_mcp(tool: str, arguments: dict[str, Any]) -> Any:
     failure = None
     payload = None
     headers = {}
-    if CFG["access_password"]:
-        token = base64.b64encode(f"fieldcall:{CFG['access_password']}".encode()).decode("ascii")
-        headers["Authorization"] = f"Basic {token}"
+    session_cookie = CURRENT_SESSION_COOKIE.get()
+    if session_cookie:
+        headers["Cookie"] = f"fieldcall_session={session_cookie}"
     async with streamablehttp_client(f"http://127.0.0.1:{CFG['port']}/mcp", headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -460,7 +521,87 @@ async def health(request: Request):
         return JSONResponse({"status":"unavailable","database":"unavailable"}, status_code=503)
 
 
-for path, endpoint, methods in [("/",homepage,["GET"]),("/style.css",stylesheet,["GET"]),("/app.js",javascript,["GET"]),("/api/events",api_events,["GET","POST"]),("/api/events/{event_id:int}/recheck",api_recheck,["POST"]),("/api/assistant",api_assistant,["POST"]),("/health",health,["GET"])]:
+async def auth_login(request: Request):
+    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
+    challenge = hashlib.sha256(verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(challenge).rstrip(b"=").decode("ascii")
+    query = urlencode({"client_id": CFG["google_client_id"], "redirect_uri": CFG["google_redirect_uri"],
+        "response_type": "code", "scope": "openid email profile", "state": state, "nonce": nonce,
+        "code_challenge": code_challenge, "code_challenge_method": "S256", "prompt": "select_account"})
+    response = RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + query, status_code=302)
+    secure = CFG["google_redirect_uri"].startswith("https://")
+    for name, value in (("fieldcall_oauth_state", state), ("fieldcall_oauth_nonce", nonce), ("fieldcall_oauth_verifier", verifier)):
+        response.set_cookie(name, value, max_age=600, httponly=True, secure=secure, samesite="lax", path="/auth")
+    return response
+
+
+async def auth_callback(request: Request):
+    state = request.query_params.get("state", "")
+    expected_state = request.cookies.get("fieldcall_oauth_state", "")
+    expected_nonce = request.cookies.get("fieldcall_oauth_nonce", "")
+    verifier = request.cookies.get("fieldcall_oauth_verifier", "")
+    if not state or not expected_state or not secrets.compare_digest(state, expected_state) or not expected_nonce or not verifier:
+        return PlainTextResponse("Google sign-in could not be verified. Please try again.", status_code=400)
+    if request.query_params.get("error"):
+        return PlainTextResponse("Google sign-in was cancelled or denied. Please try again.", status_code=400)
+    code = request.query_params.get("code", "")
+    if not code:
+        return PlainTextResponse("Google did not return an authorization code.", status_code=400)
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        token_response = await client.post("https://oauth2.googleapis.com/token", data={
+            "code": code, "client_id": CFG["google_client_id"], "client_secret": CFG["google_client_secret"],
+            "redirect_uri": CFG["google_redirect_uri"], "grant_type": "authorization_code", "code_verifier": verifier})
+        if token_response.status_code != 200:
+            return PlainTextResponse("Google sign-in failed while exchanging its authorization code.", status_code=502)
+        body = token_response.json()
+        identity_token = body.get("id_token") if isinstance(body, dict) else None
+        if not isinstance(identity_token, str):
+            return PlainTextResponse("Google did not return an identity token.", status_code=502)
+        key_response = await client.get("https://www.googleapis.com/oauth2/v3/certs")
+        if key_response.status_code != 200:
+            return PlainTextResponse("Google identity keys are temporarily unavailable.", status_code=502)
+        keys = key_response.json().get("keys", [])
+    try:
+        header = jwt.get_unverified_header(identity_token)
+        jwk = next(key for key in keys if key.get("kid") == header.get("kid") and key.get("kty") == "RSA")
+        claims = jwt.decode(identity_token, jwt.PyJWK.from_dict(jwk).key, algorithms=["RS256"],
+            audience=CFG["google_client_id"], issuer=["https://accounts.google.com", "accounts.google.com"],
+            options={"require": ["exp", "iat", "sub", "aud", "iss", "nonce"]})
+        if abs(time.time() - int(claims["iat"])) > 600:
+            raise jwt.InvalidTokenError("identity token is too old")
+        if not secrets.compare_digest(str(claims["nonce"]), expected_nonce):
+            raise jwt.InvalidTokenError("nonce mismatch")
+        if claims.get("azp") and claims["azp"] != CFG["google_client_id"]:
+            raise jwt.InvalidTokenError("authorized party mismatch")
+        if claims.get("email_verified") is not True or not claims.get("email"):
+            raise jwt.InvalidTokenError("verified email required")
+    except (jwt.PyJWTError, KeyError, StopIteration, TypeError):
+        return PlainTextResponse("Google identity could not be verified. Please try again.", status_code=401)
+    user = {"sub": str(claims["sub"]), "email": str(claims["email"]), "name": str(claims.get("name") or claims["email"])}
+    response = RedirectResponse("/dashboard", status_code=303)
+    response.set_cookie("fieldcall_session", session_token(user), max_age=7 * 24 * 3600, httponly=True,
+        secure=CFG["google_redirect_uri"].startswith("https://"), samesite="lax", path="/")
+    response.delete_cookie("fieldcall_oauth_state", path="/auth")
+    response.delete_cookie("fieldcall_oauth_nonce", path="/auth")
+    response.delete_cookie("fieldcall_oauth_verifier", path="/auth")
+    return response
+
+
+async def auth_logout(request: Request):
+    response = JSONResponse({"signed_out": True})
+    response.delete_cookie("fieldcall_session", path="/")
+    return response
+
+
+async def api_session(request: Request):
+    user = CURRENT_USER.get()
+    if not user:
+        return JSONResponse({"authenticated": False})
+    return JSONResponse({"authenticated": True, "name": user.get("name", ""), "email": user.get("email", "")})
+
+
+for path, endpoint, methods in [("/",homepage,["GET"]),("/dashboard",dashboard,["GET"]),("/landing.css",landing_stylesheet,["GET"]),("/dashboard.css",dashboard_stylesheet,["GET"]),("/fieldcall-hero.webp",hero_image,["GET"]),("/dashboard-bg.webp",dashboard_image,["GET"]),("/style.css",stylesheet,["GET"]),("/app.js",javascript,["GET"]),("/api/session",api_session,["GET"]),("/api/events",api_events,["GET","POST"]),("/api/events/{event_id:int}/recheck",api_recheck,["POST"]),("/api/assistant",api_assistant,["POST"]),("/health",health,["GET"]),("/auth/login",auth_login,["GET"]),("/auth/callback",auth_callback,["GET"]),("/auth/logout",auth_logout,["POST"])]:
     mcp.custom_route(path, methods=methods)(endpoint)
 
 
@@ -476,26 +617,20 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 class AccessControl(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        password = CFG["access_password"]
-        if not password or request.url.path == "/health":
+        path = request.url.path
+        public_paths = {"/health", "/", "/style.css", "/landing.css", "/dashboard.css", "/dashboard-bg.webp", "/fieldcall-hero.webp", "/app.js", "/api/session", "/auth/login", "/auth/callback", "/auth/logout"}
+        user = decode_session(request.cookies.get("fieldcall_session", ""))
+        if path == "/dashboard" and not user:
+            return RedirectResponse("/auth/login", status_code=303)
+        if path not in public_paths and not user:
+            return JSONResponse({"error": "Sign in with Google to continue", "login": "/auth/login"}, status_code=401)
+        user_token = CURRENT_USER.set(user)
+        cookie_token = CURRENT_SESSION_COOKIE.set(request.cookies.get("fieldcall_session"))
+        try:
             return await call_next(request)
-        supplied_user = supplied_password = ""
-        authorization = request.headers.get("authorization", "")
-        if authorization.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
-                supplied_user, separator, supplied_password = decoded.partition(":")
-                if not separator:
-                    supplied_user = supplied_password = ""
-            except (ValueError, UnicodeDecodeError):
-                pass
-        valid_user = hmac.compare_digest(supplied_user.encode(), b"fieldcall")
-        valid_password = hmac.compare_digest(supplied_password.encode(), password.encode())
-        if not (valid_user and valid_password):
-            from starlette.responses import PlainTextResponse
-            return PlainTextResponse("Authentication required", status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="FieldCall"'})
-        return await call_next(request)
+        finally:
+            CURRENT_USER.reset(user_token)
+            CURRENT_SESSION_COOKIE.reset(cookie_token)
 
 
 if __name__ == "__main__":

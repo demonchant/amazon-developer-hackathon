@@ -7,19 +7,19 @@ FieldCall helps community event organizers record an outdoor event, their person
 ## Verification now
 
 - `VERIFIED`: local MCP Streamable HTTP handshake negotiated MCP `2025-11-25`; the server exposed three tools; local list call returned a genuine empty database.
-- `VERIFIED`: eight isolated validation, normalization, coverage, unit-conversion and conservative-comparison tests pass. Their inputs are unit fixtures only, never product records.
-- `IMPLEMENTED / UNVERIFIED`: event save, global forecast retrieval, MET expiry-aware cache, comparison persistence/read-back and recheck history.
-- `BLOCKED`: live MET provider call needs a real `WEATHER_USER_AGENT` contact you control. No live response is claimed. Docker engine permissions and offline npm registry also prevent container and Playwright verification.
+- `VERIFIED`: ten isolated tests pass, including signed-session checks and per-account event isolation. A local smoke run exercised the landing page, Google authorization redirect, protected dashboard, real MCP-backed event save/list, and cross-account separation using a temporary database. No test records remain.
+- `IMPLEMENTED / UNVERIFIED`: Google authorization-code exchange and Google ID-token verification; live MET Norway forecast retrieval and persisted evaluation.
+- `BLOCKED`: Google credentials are not configured here, so the real Google sign-in was not completed. No live MET Norway forecast response is claimed. Docker engine access and the configured OAuth credentials are needed for the Compose/Playwright run.
 - No Amazon device is needed for the rules' Alexa+ simulated web route. Official event FAQ says the Alexa+ SDK, Toolkit, CLI, and official Web Simulator are unavailable to participants; the rules permit using your own web MCP-client simulation, so no Amazon device is needed.
-- No public GitHub repo, recording, Devpost entry, or receipt has been created.
+- The project repository and Render deployment were provided by the entrant. A public demonstration video and final Devpost submission receipt are not yet recorded here.
 
 ## Run locally
 
-Use Python 3.12+, make a virtual environment, install `requirements.txt`, copy `.env.example` to `.env`, and set `WEATHER_USER_AGENT` to an identifying app string plus a contact method you control. MET Norway requires a unique User-Agent. Never use the example value as if it were your contact.
+Use Python 3.12+, make a virtual environment, install `requirements.txt`, and copy `.env.example` to `.env`. Configure `WEATHER_USER_AGENT`, Google OAuth web-client credentials, the exact local redirect URI, and a random `SESSION_SIGNING_KEY`. Add `http://localhost:8080/auth/callback` to that OAuth client's authorized redirect URIs. MET Norway requires an identifying User-Agent. Never put credentials in GitHub.
 
 ```powershell
 Copy-Item .env.example .env -Force
-# Edit WEATHER_USER_AGENT with your actual contact method.
+# Add your Google OAuth client settings and session signing key as well.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -34,11 +34,11 @@ python -m unittest discover -s tests -v
 
 ## Render deployment
 
-The root `render.yaml` defines a paid 0.5 CPU / 512 MB Docker web service in Frankfurt with `/health` checks. Connect this GitHub repository in Render as a Blueprint and deploy it. Render supplies `PORT` and the app binds to it; set `WEATHER_USER_AGENT` in the Blueprint and Render generates `FIELDCALL_ACCESS_PASSWORD`. Open the service URL and use username `fieldcall` with the generated password from the Render environment settings. Keep that password private; share it with judges only in the testing instructions if needed.
+The root `render.yaml` defines a paid 0.5 CPU / 512 MB Docker web service in Frankfurt with `/health` checks. Configure the Google OAuth web client before deploying these changes. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in Render and authorize the exact callback `https://fieldcall.onrender.com/auth/callback`; Render generates `SESSION_SIGNING_KEY` in a Blueprint deployment. Set the consent audience to External and request only `openid`, `email`, and `profile`. Users sign in with Google, and events are partitioned by Google's verified stable subject ID. Judges can use their own Google account; no shared password is needed. If this is an existing Render service rather than a Blueprint, add every variable manually in its Environment settings. See `.env.example` for local configuration.
 
-Render Free sleeps after 15 minutes idle and uses an ephemeral filesystem. FieldCall's SQLite event records and history can disappear when the service sleeps, restarts, or redeploys. This deployment is suitable for a short, fresh demo, not durable event storage. The live site still needs a real MET Norway request to verify the provider integration.
+The selected paid Render compute does not sleep from inactivity, but its filesystem is still ephemeral unless you attach a persistent disk. FieldCall's SQLite event records and history can disappear on restart or redeploy without persistent storage. The live site still needs a real Google sign-in and MET Norway request to verify those integrations.
 
-See [mechanism](docs/mechanism.md), [deployment](docs/deployment.md), [selection](docs/hackathon-analysis.md), [rubric/claims](docs/rubric-matrix.md), [competitors](docs/competitive-analysis.md), [dependency/security review](docs/dependency-audit.md), [demo plan](docs/demo-and-pitch.md), [evidence index](evidence/README.md), and [product feedback](docs/product-feedback.md).
+The public repository includes setup and testing instructions here. Local research notes are maintained separately and are not required to run the product.
 
 ## Real data flow
 

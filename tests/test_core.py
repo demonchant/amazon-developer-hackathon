@@ -3,6 +3,10 @@ import os, uuid, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 os.environ.setdefault("WEATHER_USER_AGENT", "FieldCallUnitTests/0.1 (contact: test@example.com)")
+os.environ.setdefault("GOOGLE_CLIENT_ID", "unit-test-client.apps.googleusercontent.com")
+os.environ.setdefault("GOOGLE_CLIENT_SECRET", "unit-test-secret")
+os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://localhost:8080/auth/callback")
+os.environ.setdefault("SESSION_SIGNING_KEY", "unit-test-signing-key-" + "x" * 40)
 os.environ["DATABASE_PATH"] = str(Path(__file__).resolve().parent.parent / "data" / ("unit-" + uuid.uuid4().hex) / "fieldcall.sqlite3")
 import app
 
@@ -48,5 +52,23 @@ class FieldCallLogicTests(unittest.TestCase):
     def test_empty_overlap_is_unknown(self):
         e=self.event();s=datetime.fromisoformat(e["starts_at"])-timedelta(days=4)
         result,_,_=app.compare(e,[self.period(s)]);self.assertEqual(result,"unknown")
+    def test_signed_session_round_trip_and_tampering(self):
+        user={"sub":"google-subject-a","email":"a@example.test","name":"A"}
+        token=app.session_token(user)
+        self.assertEqual(app.decode_session(token),user)
+        self.assertIsNone(app.decode_session(token+"x"))
+    def test_saved_events_are_partitioned_by_google_subject(self):
+        owner=app.CURRENT_USER.set({"sub":"google-subject-a","email":"a@example.test"})
+        try:
+            saved=app.save_outdoor_event(**self.event())
+            self.assertNotIn("owner_id",saved)
+            self.assertEqual([x["id"] for x in app.list_outdoor_events()],[saved["id"]])
+        finally:
+            app.CURRENT_USER.reset(owner)
+        other=app.CURRENT_USER.set({"sub":"google-subject-b","email":"b@example.test"})
+        try:
+            self.assertEqual(app.list_outdoor_events(),[])
+        finally:
+            app.CURRENT_USER.reset(other)
 
 if __name__=="__main__":unittest.main()

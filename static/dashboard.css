@@ -1,0 +1,12 @@
+body.dashboard-page{min-height:100vh;background-color:#87917b;background-image:linear-gradient(rgba(240,241,231,.24),rgba(240,241,231,.36)),url('/dashboard-bg.webp');background-size:cover;background-position:center 38%;background-attachment:fixed}
+body.dashboard-page header{background:rgba(246,245,239,.64);backdrop-filter:blur(9px);border-bottom-color:rgba(220,222,210,.75)}
+body.dashboard-page .hero{padding-inline:24px;background:rgba(246,245,239,.56);backdrop-filter:blur(5px);border-bottom-color:rgba(220,222,210,.62)}
+body.dashboard-page .note{background:rgba(212,232,121,.78)}
+body.dashboard-page .assistant{background:rgba(233,238,228,.72);backdrop-filter:blur(8px);border-left-color:rgba(113,132,92,.85)}
+body.dashboard-page .form-panel,body.dashboard-page .events-panel{padding:24px;background:rgba(246,245,239,.72);border:1px solid rgba(220,222,210,.78);backdrop-filter:blur(8px)}
+body.dashboard-page input{background:rgba(255,254,250,.88)}
+body.dashboard-page .card{background:rgba(255,254,250,.86);backdrop-filter:blur(6px)}
+body.dashboard-page .chat-user{background:rgba(255,254,250,.87)}
+body.dashboard-page .empty{background:rgba(255,254,250,.62)}
+@media(max-width:760px){body.dashboard-page{background-attachment:scroll;background-position:57% top}body.dashboard-page .hero{padding-inline:18px}body.dashboard-page .form-panel,body.dashboard-page .events-panel{padding:17px}}
+@media(prefers-reduced-transparency:reduce){body.dashboard-page header,body.dashboard-page .hero,body.dashboard-page .assistant,body.dashboard-page .form-panel,body.dashboard-page .events-panel,body.dashboard-page .card{backdrop-filter:none;background-color:rgba(246,245,239,.94)}}

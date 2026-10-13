@@ -1,7 +1,52 @@
-﻿<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#122b2a"><title>FieldCall — weather, on your terms</title><link rel="stylesheet" href="/style.css"></head><body>
-<header><a class="brand" href="/" aria-label="FieldCall home"><span class="mark">F</span><span>FIELDCALL<small>FIELD NOTES FOR OUTDOOR PLANS</small></span></a><div class="head-right"><span class="sim-tag">ALEXA+ HOST SIMULATED</span><a class="mcp-link" href="/mcp">MCP endpoint <span>↗</span></a></div></header>
-<main><section class="hero"><div><p class="eyebrow">A WEATHER CHECK-IN FOR YOUR EVENT</p><h1>Plan around<br><em>your own limits.</em></h1><p class="lede">Save an outdoor event, set the conditions that matter to you, and request a source-linked comparison with a live MET Norway forecast. Recheck when you want a new observation.</p><p class="fine">The Alexa+ host is simulated for this web demo. MCP calls are real. Any forecast shown must come from MET Norway; provider access has not yet been verified in this environment. A comparison, not safety advice.</p></div><aside class="note"><span class="sun">◌</span><p>YOUR EVENT.<br>YOUR THRESHOLDS.<br><strong>LIVE SOURCE CHECK.</strong></p><small>Global coverage · MET Norway</small></aside></section>
-<section class="assistant"><div class="assistant-title"><div><p class="eyebrow">ALEXA+ EXPERIENCE / SIMULATED HOST</p><h2>Ask FieldCall</h2></div><span class="step">DETERMINISTIC TOOL ROUTER</span></div><p class="helper">This preview routes a small set of requests to real MCP tools; it does not use a language model or claim an Alexa+ connection. Save a plan in the form below, then try “List my events” or “Recheck event followed by an ID” using an ID shown in your saved notes.</p><form id="assistant-form"><label for="assistant-input">Your request</label><div class="assistant-entry"><input id="assistant-input" maxlength="300" autocomplete="off" placeholder="List my events" required><button class="assistant-send" type="submit">Ask <span>→</span></button></div></form><div id="conversation" class="conversation" role="log" aria-live="polite" aria-relevant="additions"></div><p id="assistant-status" class="status" role="status" aria-live="polite"></p></section>
-<section class="layout"><section class="form-panel"><div class="section-head"><div><p class="eyebrow">01 / SAVE THE PLAN</p><h2>Event details</h2></div><span class="step">NEW PLAN</span></div><form id="event-form"><label>Event name<input name="name" required minlength="2" maxlength="100" placeholder="Name an event you are organizing"></label><div class="grid two"><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" required placeholder="Decimal latitude"></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" required placeholder="Decimal longitude"></label></div><p class="helper">Use coordinates for an outdoor location worldwide. Global forecasts have coarser resolution in many regions. Coordinates are sent to MET Norway for each check. Event data is stored in local SQLite.</p><div class="grid two"><label>Starts <span class="sub">your local time</span><input name="starts_at" type="datetime-local" required></label><label>Ends <span class="sub">your local time</span><input name="ends_at" type="datetime-local" required></label></div><p class="helper">Date and time use your browser's timezone. Event window up to 72 hours.</p><fieldset><legend>Your weather limits <span class="sub">set at least one</span></legend><div class="grid two"><label>Maximum temperature <span class="sub">°C</span><input name="max_temp_c" type="number" min="-80" max="60" step="any" placeholder="Optional"></label><label>Minimum temperature <span class="sub">°C</span><input name="min_temp_c" type="number" min="-100" max="50" step="any" placeholder="Optional"></label><label>Maximum wind <span class="sub">km/h</span><input name="max_wind_kph" type="number" min="0" max="500" step="any" placeholder="Optional"></label><label>Maximum rain <span class="sub">mm</span><input name="max_precip_mm" type="number" min="0" max="500" step="any" placeholder="Optional"></label></div><p class="helper">MET Norway provides precipitation amounts for available forecast periods. If a required measurement is absent or forecast coverage is incomplete, the result stays unknown.</p></fieldset><button type="submit" class="primary">Save event &amp; check forecast <span>→</span></button><p id="form-status" class="status" role="status" aria-live="polite"></p></form></section>
-<section class="events-panel"><div class="section-head"><div><p class="eyebrow">02 / KEEP WATCH</p><h2>Your field notes</h2></div><span id="count" class="step">0 SAVED</span></div><p id="load-status" class="status" role="status" aria-live="polite">Loading saved events…</p><div id="events"></div></section></section><footer><span>FIELDCALL <i>·</i> FORECASTS WITH PROVENANCE</span><span>Data: <a href="https://api.met.no/weatherapi/locationforecast/2.0/documentation" target="_blank" rel="noreferrer">MET Norway API ↗</a> | <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a> | FieldCall comparison is derived</span></footer></main><script src="/app.js" defer></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#122b2a">
+  <meta name="description" content="Plan outdoor events around the weather limits that matter to you, with source-linked forecast comparisons.">
+  <title>FieldCall — plan with the weather in view</title>
+  <link rel="stylesheet" href="/landing.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="FieldCall home"><span class="mark">F</span><span>FIELDCALL<small>FIELD NOTES FOR OUTDOOR PLANS</small></span></a>
+    <nav aria-label="Main navigation"><a href="#how-it-works">How it works</a><a href="#about">About</a><a class="nav-cta" href="/dashboard">Open FieldCall <span aria-hidden="true">↗</span></a></nav>
+  </header>
 
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="live-dot"></span> WEATHER CHECKS FOR OUTDOOR PLANS</p>
+        <h1 id="hero-title">Make room for<br><em>the forecast.</em></h1>
+        <p class="intro">Your event has its own place, time, and weather limits. FieldCall brings them together with a source-linked forecast, so you can review the conditions that matter to your plan.</p>
+        <div class="hero-actions"><a class="button-primary" href="/dashboard">Try FieldCall <span aria-hidden="true">→</span></a><a class="text-link" href="#how-it-works">See how it works <span aria-hidden="true">↓</span></a></div>
+        <p class="privacy-note">Sign in with Google to keep your event notes private to your account.</p>
+      </div>
+      <figure class="hero-art">
+        <img src="/fieldcall-hero.webp" width="1448" height="1086" alt="An event organizer looks across a community park as a small outdoor gathering is set up at sunset." fetchpriority="high">
+      </figure>
+    </section>
+
+    <section class="proof-strip" aria-label="FieldCall product principles"><span>YOUR EVENT</span><i></i><span>YOUR WEATHER LIMITS</span><i></i><span>FORECAST WITH A SOURCE</span></section>
+
+    <section class="how section" id="how-it-works">
+      <div class="section-heading"><p class="eyebrow">A SMALL TOOL FOR A REAL PLANNING QUESTION</p><h2>One place to check<br><em>what matters to you.</em></h2></div>
+      <div class="steps">
+        <article class="step-card"><span class="step-number">01</span><div class="step-icon icon-pin" aria-hidden="true">⌖</div><h3>Save the event</h3><p>Add its name, coordinates, and timezone-aware start and end times.</p></article>
+        <article class="step-card"><span class="step-number">02</span><div class="step-icon icon-limits" aria-hidden="true">↗</div><h3>Set your limits</h3><p>Choose the temperature, wind, or precipitation thresholds you want to review.</p></article>
+        <article class="step-card"><span class="step-number">03</span><div class="step-icon icon-check" aria-hidden="true">◎</div><h3>Check the forecast</h3><p>Compare a real MET Norway forecast with your event window and saved limits.</p></article>
+      </div>
+    </section>
+
+    <section class="source-section" id="about">
+      <div class="source-mark" aria-hidden="true"><span>F</span><i></i></div>
+      <div><p class="eyebrow">CLEAR ABOUT THE SOURCE</p><h2>A forecast comparison,<br><em>with its limits in view.</em></h2><p>Each check links to the MET Norway forecast used and shows when the data was retrieved. If coverage or a measurement is missing, FieldCall says so instead of filling in a guess.</p><a class="source-link" href="https://api.met.no/weatherapi/locationforecast/2.0/documentation" target="_blank" rel="noreferrer">About MET Norway Locationforecast <span aria-hidden="true">↗</span></a></div>
+    </section>
+
+    <section class="closing-cta"><p class="eyebrow">START WITH YOUR NEXT OUTDOOR PLAN</p><h2>Put your plan<br><em>in perspective.</em></h2><a class="button-primary" href="/dashboard">Open FieldCall <span aria-hidden="true">→</span></a><p>Google sign-in · Private event notes · No access to Gmail or Drive</p></section>
+  </main>
+
+  <footer><a class="brand footer-brand" href="/" aria-label="FieldCall home"><span class="mark">F</span><span>FIELDCALL<small>FIELD NOTES FOR OUTDOOR PLANS</small></span></a><p>Forecast comparisons are informational, not safety advice.</p><span>MET Norway data · FieldCall derived comparison</span></footer>
+</body>
+</html>
