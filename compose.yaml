@@ -1,0 +1,44 @@
+services:
+  web:
+    build: .
+    env_file: .env
+    environment:
+      FIELDCALL_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - fieldcall-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    init: true
+    ipc: host
+    depends_on:
+      web:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+      - /home/pwuser/.cache:size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./playwright-report:/tests/playwright-report
+      - ./test-results:/tests/test-results
+    networks: [default]
+    profiles: [test]
+volumes:
+  fieldcall-data:
