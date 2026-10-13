@@ -32,6 +32,12 @@ Open `http://127.0.0.1:8080`. Missing/invalid config fails at startup. No weathe
 python -m unittest discover -s tests -v
 ```
 
+## Render deployment
+
+The root `render.yaml` defines a free Docker web service in Frankfurt with `/health` checks. Connect this GitHub repository in Render as a Blueprint and deploy it. Render supplies `PORT` and the app binds to it; set `WEATHER_USER_AGENT` in the Blueprint and Render generates `FIELDCALL_ACCESS_PASSWORD`. Open the service URL and use username `fieldcall` with the generated password from the Render environment settings. Keep that password private; share it with judges only in the testing instructions if needed.
+
+Render Free sleeps after 15 minutes idle and uses an ephemeral filesystem. FieldCall's SQLite event records and history can disappear when the service sleeps, restarts, or redeploys. This deployment is suitable for a short, fresh demo, not durable event storage. The live site still needs a real MET Norway request to verify the provider integration.
+
 See [mechanism](docs/mechanism.md), [deployment](docs/deployment.md), [selection](docs/hackathon-analysis.md), [rubric/claims](docs/rubric-matrix.md), [competitors](docs/competitive-analysis.md), [dependency/security review](docs/dependency-audit.md), [demo plan](docs/demo-and-pitch.md), [evidence index](evidence/README.md), and [product feedback](docs/product-feedback.md).
 
 ## Real data flow

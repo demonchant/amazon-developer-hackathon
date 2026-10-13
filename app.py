@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import asyncio
+import base64
+import hmac
 import os
 import re
 import sqlite3
@@ -44,10 +46,11 @@ load_local_env()
 
 def config() -> dict[str, Any]:
     host = os.getenv("FIELDCALL_HOST", "127.0.0.1")
-    port = int(os.getenv("FIELDCALL_PORT", "8080"))
+    port = int(os.getenv("PORT", os.getenv("FIELDCALL_PORT", "8080")))
     user_agent = os.getenv("WEATHER_USER_AGENT", "").strip()
     db_path = os.getenv("DATABASE_PATH", "data/fieldcall.sqlite3")
     timeout = float(os.getenv("WEATHER_TIMEOUT_SECONDS", "12"))
+    access_password = os.getenv("FIELDCALL_ACCESS_PASSWORD", "").strip()
     if host not in ("127.0.0.1", "0.0.0.0"):
         raise ValueError("FIELDCALL_HOST must be 127.0.0.1 or 0.0.0.0")
     if not (1 <= port <= 65535):
@@ -59,7 +62,10 @@ def config() -> dict[str, Any]:
         raise ValueError("WEATHER_USER_AGENT must include a contact email or HTTPS project/contact URL")
     if not (2 <= timeout <= 60):
         raise ValueError("WEATHER_TIMEOUT_SECONDS must be 2..60")
-    return {"host": host, "port": port, "user_agent": user_agent, "db_path": db_path, "timeout": timeout}
+    if access_password and len(access_password) < 24:
+        raise ValueError("FIELDCALL_ACCESS_PASSWORD must contain at least 24 characters when configured")
+    return {"host": host, "port": port, "user_agent": user_agent, "db_path": db_path, "timeout": timeout,
+            "access_password": access_password}
 
 
 CFG = config()
@@ -303,8 +309,10 @@ def event_dict(row: sqlite3.Row, history: bool = True) -> dict[str, Any]:
 mcp = FastMCP("FieldCall", instructions="Save outdoor events worldwide and compare user-entered weather tolerances with MET Norway global forecasts. Results are not safety advice.",
     host=CFG["host"], port=CFG["port"], streamable_http_path="/mcp", json_response=True, stateless_http=True,
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True,
-      allowed_hosts=["127.0.0.1:*", "localhost:*", "web:*"] if CFG["host"] == "0.0.0.0" else ["127.0.0.1:*", "localhost:*"],
-      allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]))
+      allowed_hosts=((["127.0.0.1:*", "localhost:*", "web:*"] if CFG["host"] == "0.0.0.0" else ["127.0.0.1:*", "localhost:*"])
+        + ([f"{os.environ['RENDER_EXTERNAL_HOSTNAME']}:*"] if os.getenv("RENDER_EXTERNAL_HOSTNAME") else [])),
+      allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]
+        + ([f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}"] if os.getenv("RENDER_EXTERNAL_HOSTNAME") else [])))
 
 
 @mcp.tool()
@@ -418,7 +426,11 @@ async def invoke_mcp(tool: str, arguments: dict[str, Any]) -> Any:
     from mcp.client.streamable_http import streamablehttp_client
     failure = None
     payload = None
-    async with streamablehttp_client(f"http://127.0.0.1:{CFG['port']}/mcp") as (read, write, _):
+    headers = {}
+    if CFG["access_password"]:
+        token = base64.b64encode(f"fieldcall:{CFG['access_password']}".encode()).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+    async with streamablehttp_client(f"http://127.0.0.1:{CFG['port']}/mcp", headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool, arguments)
@@ -462,7 +474,32 @@ class SecurityHeaders(BaseHTTPMiddleware):
         return response
 
 
+class AccessControl(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        password = CFG["access_password"]
+        if not password or request.url.path == "/health":
+            return await call_next(request)
+        supplied_user = supplied_password = ""
+        authorization = request.headers.get("authorization", "")
+        if authorization.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+                supplied_user, separator, supplied_password = decoded.partition(":")
+                if not separator:
+                    supplied_user = supplied_password = ""
+            except (ValueError, UnicodeDecodeError):
+                pass
+        valid_user = hmac.compare_digest(supplied_user.encode(), b"fieldcall")
+        valid_password = hmac.compare_digest(supplied_password.encode(), password.encode())
+        if not (valid_user and valid_password):
+            from starlette.responses import PlainTextResponse
+            return PlainTextResponse("Authentication required", status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="FieldCall"'})
+        return await call_next(request)
+
+
 if __name__ == "__main__":
     server = mcp.streamable_http_app()
+    server.add_middleware(AccessControl)
     server.add_middleware(SecurityHeaders)
     uvicorn.run(server, host=CFG["host"], port=CFG["port"], log_level="info")

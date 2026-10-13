@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: fieldcall
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    envVars:
+      - key: WEATHER_USER_AGENT
+        value: "FieldCall/0.1 (https://github.com/demonchant/amazon-developer-hackathon)"
+      - key: FIELDCALL_HOST
+        value: 0.0.0.0
+      - key: FIELDCALL_ACCESS_PASSWORD
+        generateValue: true
