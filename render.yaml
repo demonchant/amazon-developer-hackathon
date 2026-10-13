@@ -2,7 +2,7 @@ services:
   - type: web
     name: fieldcall
     runtime: docker
-    plan: free
+    plan: 0.5c-512mb
     region: frankfurt
     healthCheckPath: /health
     envVars:

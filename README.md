@@ -34,7 +34,7 @@ python -m unittest discover -s tests -v
 
 ## Render deployment
 
-The root `render.yaml` defines a free Docker web service in Frankfurt with `/health` checks. Connect this GitHub repository in Render as a Blueprint and deploy it. Render supplies `PORT` and the app binds to it; set `WEATHER_USER_AGENT` in the Blueprint and Render generates `FIELDCALL_ACCESS_PASSWORD`. Open the service URL and use username `fieldcall` with the generated password from the Render environment settings. Keep that password private; share it with judges only in the testing instructions if needed.
+The root `render.yaml` defines a paid 0.5 CPU / 512 MB Docker web service in Frankfurt with `/health` checks. Connect this GitHub repository in Render as a Blueprint and deploy it. Render supplies `PORT` and the app binds to it; set `WEATHER_USER_AGENT` in the Blueprint and Render generates `FIELDCALL_ACCESS_PASSWORD`. Open the service URL and use username `fieldcall` with the generated password from the Render environment settings. Keep that password private; share it with judges only in the testing instructions if needed.
 
 Render Free sleeps after 15 minutes idle and uses an ephemeral filesystem. FieldCall's SQLite event records and history can disappear when the service sleeps, restarts, or redeploys. This deployment is suitable for a short, fresh demo, not durable event storage. The live site still needs a real MET Norway request to verify the provider integration.
 
